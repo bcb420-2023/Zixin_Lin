@@ -1,0 +1,265 @@
+---
+title: "BCB420 Assignment 1"
+author: "Zixin Lin"
+output:
+  html_document:
+    df_print: paged
+  doc: yes
+  toc_depth: 2
+  html_notebook: null
+---
+
+```{r setup, include=FALSE}
+if (! requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+}
+if (! requireNamespace("GEOquery", quietly = TRUE)) {
+    BiocManager::install("GEOquery")
+}
+if (!requireNamespace("biomaRt", quietly = TRUE, force = TRUE)) {
+  BiocManager::install("biomaRt")
+}
+library(GEOquery)
+library(knitr)
+library(edgeR)
+library(biomaRt)
+
+# downloading GEO dataset
+GSE <- getGEO("GSE221786", GSEMatrix=FALSE)
+
+# Information about Platform
+GPL <- names(GPLList(GSE))[1]
+GPL_info <- Meta(getGEO(GPL))
+
+# get the expression data
+sfiles <- getGEOSuppFiles('GSE221786')
+fnames <- rownames(sfiles)
+count_exp = read.delim(fnames[1],header=TRUE, check.names = FALSE)
+```
+
+### 1. Expression Dataset Selection
+
+**GEO ID:** GSE221786
+
+**Dataset Name:** Differentially Expressed Genes in Males and Females with Ankylosing Spondylitis (AS): Discrete Effectors in IL-17-producing Cells of Patients with AS.
+
+**Platform Title:** `r GPL_info$title`
+
+**Technology:** `r GPL_info$technology`
+
+**Submission Date:** `r GPL_info$submission_date`
+
+**Last Update Date:** `r GPL_info$last_update_date`
+
+**Organism:** `r GPL_info$organism`
+
+**Number of GEO datasets that use this technology:** `r length(GPL_info$series_id)`
+
+**Number of GEO samples that use this technology:** `r length(GPL_info$sample_id)`
+
+```{r echo=FALSE}
+kable(data.frame(head(Meta(GSE))))
+# Preview of data
+kable(count_exp[1:5,1:10], format = "html")
+```
+
+### 2. Clean Dataset
+
+#### Data Coverage
+
+-   The dataset covers 25228 genes
+
+```{r, results='hide'}
+dim(count_exp) # 25228    30
+colnames(count_exp)
+```
+
+#### Define Groups
+
+-   **gender**: Male (M) or Female (F)
+-   **group**: with Ankylosing Spondylitis (AS) and control (Ctrl)
+
+```{r}
+samples <- data.frame(lapply(colnames(count_exp)[3:30],
+ FUN=function(x){unlist(strsplit(x,
+ split = "\\_"))[c(1,2)]}))
+colnames(samples) <- colnames(count_exp)[3:30]
+rownames(samples) <- c("group","gender")
+samples <- data.frame(t(samples))
+```
+
+#### Filter Low Count Genes
+
+-   Result: filtered 10191 genes out, 15037 left
+
+```{r, results='hide'}
+cpms <- edgeR::cpm(count_exp[,3:30])
+rownames(cpms) <- count_exp[,1]
+# Get rid of low counts, there are 2 samples of each group so n=2
+keep = rowSums(cpms > 1) >= 2
+count_exp_filtered <- count_exp[keep, ]
+# After filtering out genes that have low counts, there are 15037 genes remaining
+nrow(count_exp) - nrow(count_exp_filtered) # 10191
+```
+
+#### Map to HUGO symbols
+
+The datatset already mapped rows to HUGO symbols
+
+#### Check GENEID duplication
+
+-   Result: there are 32 duplicated genes, and all the duplicated genes are deleted.
+Remains 15005 unique genes
+
+```{r}
+# Get the summarized counts for each gene
+summarized_gene_counts_filtered <- sort(table(count_exp_filtered$gene),decreasing = TRUE)
+length(summarized_gene_counts_filtered[which(summarized_gene_counts_filtered>1)])
+# The problem of duplicated genes has been solved partially
+kable(summarized_gene_counts_filtered[
+ which(summarized_gene_counts_filtered>1)[1:10]],
+ format="html")
+count_exp_filtered <- count_exp_filtered[!duplicated(count_exp_filtered$gene),]
+rownames(count_exp_filtered) <- count_exp_filtered[,1]
+```
+
+
+### 3. Data Normalization
+
+#### Pre-normalization: Boxplot
+
+```{r, warning=FALSE}
+# boxplot for pre-normalized dataset
+data2plot <- log2(cpm(count_exp_filtered[,3:30]))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM",
+ las = 2, cex = 0.5, cex.lab = 0.5,
+ cex.axis = 0.5, main = "Pre-Normalized GSE221786 RNASeq Samples")
+#draw the median on each box plot
+abline(h = median(apply(data2plot, 2, median)),
+ col = "green", lwd = 0.6, lty = "dashed")
+```
+
+#### Pre-normalization: Density Plot
+
+```{r, warning=FALSE}
+# density plot for pre-normalized dataset
+counts_density <- apply(log2(cpm(count_exp_filtered[,3:30])),
+ 2, density)
+ #calculate the limits across all the samples
+ xlim <- 0; ylim <- 0
+ for (i in 1:length(counts_density)) {
+ xlim <- range(c(xlim, counts_density[[i]]$x));
+ ylim <- range(c(ylim, counts_density[[i]]$y))
+ }
+ cols <- rainbow(length(counts_density))
+ ltys <- rep(1, length(counts_density))
+ #plot the first density plot to initialize the plot
+ plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ ylab="Smoothing density of log2-CPM",
+ main="", cex.lab = 0.85)
+ #plot each line
+ for (i in 1:length(counts_density))
+ lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+ #create legend
+ legend("topright", colnames(data2plot),
+ col=cols, lty=ltys, cex=0.75,
+ border ="blue", text.col = "green4",
+ merge = TRUE, bg = "gray90") 
+```
+
+The box plot and density plots indicate that there isn't a particularly large amount of variation between the samples as a whole, with medians approximately equal in the boxplots and the density distributions roughly aligned as well. Nevertheless, normalization can still help.
+
+#### Apply Normalization
+
+-   **Method**: TMM
+-   **Reason**: since the experiment was perform using RNA-seq, TMM normalization is perferred over quantile normalization method
+
+```{r}
+filtered_data_matrix <- as.matrix(count_exp_filtered[,3:30])
+# Rownames be the ensembl id
+rownames(filtered_data_matrix) <- count_exp_filtered$ensembl_id
+d = DGEList(counts=filtered_data_matrix, group=samples$group)
+# Normalization
+d = calcNormFactors(d)
+normalized_counts <- cpm(d)
+rownames(normalized_counts) <- count_exp_filtered$gene
+nrow(normalized_counts)
+# HUGO symbols as rownames of the dataframe
+kable(normalized_counts[1:5,1:5], format = "html")
+```
+
+#### After Normalization: Boxplot
+
+-   **Result**: improved a lot compared to the previous box plot, the data is more centered to the mean
+
+```{r, warning=FALSE}
+data2plot_after <- log2(normalized_counts)
+boxplot(data2plot_after, xlab = "Samples", ylab = "log2 CPM",
+ las = 2, cex = 0.5, cex.lab = 0.5,
+ cex.axis = 0.5, main = "Normalized GSE221786 RNASeq Samples")
+#draw the median on each box plot
+abline(h = median(apply(data2plot_after, 2, median)),
+ col = "green", lwd = 0.6, lty = "dashed")
+```
+
+#### After Normalization: Density Plot
+
+-   **Result**: the normalization
+
+```{r}
+# density plot for normalized dataset
+counts_density <- apply(log2(normalized_counts), 2, density)
+ #calculate the limits across all the samples
+ xlim <- 0; ylim <- 0
+ for (i in 1:length(counts_density)) {
+ xlim <- range(c(xlim, counts_density[[i]]$x));
+ ylim <- range(c(ylim, counts_density[[i]]$y))
+ }
+ cols <- rainbow(length(counts_density))
+ ltys <- rep(1, length(counts_density))
+ #plot the first density plot to initialize the plot
+ plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ ylab="Smoothing density of log2-CPM",
+ main="", cex.lab = 0.85)
+ #plot each line
+ for (i in 1:length(counts_density))
+ lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+ #create legend
+ legend("topright", colnames(data2plot),
+ col=cols, lty=ltys, cex=0.75,
+ border ="blue", text.col = "green4",
+ merge = TRUE, bg = "gray90") 
+```
+
+#### After Normalization: MDS plot
+
+-   **Result**: the samples are grouped together based on their gender
+```{r}
+plotMDS(d, labels=rownames(samples),
+  col = c("darkgreen","blue")[factor(samples$gender)])
+```
+
+### 4.Interpret and Document
+* __Questions__
+  * *What are the control and test conditions of the dataset?*
+    * The control is the healthy human male and female samples, and the test conditions are the patients with Ankylosing Spondylitis. The goal of the expriment is to compare differential effectors of IL-17 pathway between male and female patients with ankylosing spondylitis (AS).
+  * *Why is the dataset of interest to you?*
+    * The experiment is about Ankylosing Spondylitis (AS) which is a disease that causes inflammation in the joints and ligaments of the spine, it is very common in real-life.
+  * *Were there expression values that were not unique for specific genes? How did you handle these?*
+    * In my case, multiple ensembl ids are mapped to the same HUGO gene symbol. The workflow I cited sugguested to map back to ensembl ids and find the highest expression ensembl id as the unique id that can map to the gene name. But since there are only 41 of them, Ruth sugguested not to exclude them out.
+  * *Were there expression values that could not be mapped to current HUGO symbols?*
+    * No. Since the expression dataset has already mapped to HUGO symbols 
+  * *How many outliers were removed?*
+    * I did not remove any sample outliers. I plotted the MDS, it shows that all my samples cluster according to geneder.
+    * I Removed 10191 genes with low counts. The threshold was genes with greater than 1 is considered to be expressed in that sample. It is considered as expressed if it has >1 count in at least three samples.
+  * *How did you handle replicates?*
+    * The final sample has two columns, group (control or AS) and gender (M or F).
+  * *What is the final coverage of your dataset?*
+    * If want unique gene names, the dataset covers 15005 genes (28 samples) after filteration and normalization.
+    * If does not care about the 32 duplicated gene names, then the dataset covers 15037 genes.  
+  
+### 5. Reference   
+1. https://www.ncbi.nlm.nih.gov/geo/info/geo2r.html#how_to_use   
+2. https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE221786  
+3. https://risserlin.github.io/BCB420-lectures-public/lecture4_data_exploration_and_normalization.html#1  
+4. http://bioconductor.org/packages/release/data/annotation/html/hugene11sttranscriptcluster.db.html 
