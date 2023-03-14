@@ -1,0 +1,299 @@
+---
+title: "BCB420 Assignment 2"
+author: "Zixin Lin"
+output:
+  html_document:
+    toc: true
+    df_print: paged
+---
+
+## Introduction
+Ankylosing spondylitis (AS), is an inflammatory disease that can cause some of 
+the bones in the spine, called vertebrae, to fuse. This fusing makes the spine 
+less flexible and can result in a hunched posture. Some researches suggest that 
+immune responses mediated by interleukin 17 (IL-17) play a pivotal role in the disease
+Expression Dataset Selection
+
+**GEO ID:** GSE221786
+
+**Dataset Name:** Differentially Expressed Genes in Males and Females with Ankylosing Spondylitis (AS): Discrete Effectors in IL-17-producing Cells of Patients with AS.
+
+```{r setup, results="hide", include = FALSE,echo=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+if (!requireNamespace("limma", quietly = TRUE))
+    BiocManager::install("limma")
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE))
+    BiocManager::install("ComplexHeatmap")
+if (!requireNamespace("edgeR", quietly = TRUE))
+    BiocManager::install("edgeR")
+if (!requireNamespace("knitr", quietly = TRUE))
+    BiocManager::install("knitr")
+if (!requireNamespace("gprofiler2", quietly = TRUE))
+    BiocManager::install("gprofiler2")
+library(GEOquery)
+library(knitr)
+library(edgeR)
+library(biomaRt)
+library(limma)
+library(edgeR)
+library(EnsDb.Hsapiens.v75)
+library(knitr)
+library(ComplexHeatmap)
+library(circlize)
+library(gprofiler2)
+```
+
+## Load Data
+First we load the normalized data from assignment 1.
+```{r Load Data}
+normalized_counts<- read.csv(file="GSE221786_normalized_counts.csv")
+samples <- read.csv(file = "filtered_samples.csv")
+kable(normalized_counts[1:5, 1:5], type="html")
+```
+
+## After Normalization
+We need to explore the data again after normalization to ensure the normalized data reaches our expectations.
+1. boxplot - normalized
+```{r boxplot_normalized, warning=FALSE}
+# After normalization
+data2plot_after <- log2(normalized_counts)
+boxplot(data2plot_after, xlab = "Samples", ylab = "log2 CPM",
+ las = 2, cex = 0.5, cex.lab = 0.5,
+ cex.axis = 0.5, main = "Normalized GSE221786 RNASeq Samples")
+#draw the median on each box plot
+abline(h = median(apply(data2plot_after, 2, median)),
+ col = "green", lwd = 0.6, lty = "dashed")
+```
+
+2. density plot - normalized
+```{r density_normalized}
+# density plot for normalized dataset
+counts_density <- apply(log2(normalized_counts), 2, density)
+ #calculate the limits across all the samples
+ xlim <- 0; ylim <- 0
+ for (i in 1:length(counts_density)) {
+ xlim <- range(c(xlim, counts_density[[i]]$x));
+ ylim <- range(c(ylim, counts_density[[i]]$y))
+ }
+ cols <- rainbow(length(counts_density))
+ ltys <- rep(1, length(counts_density))
+ #plot the first density plot to initialize the plot
+ plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ ylab="Smoothing density of log2-CPM",
+ main="", cex.lab = 0.85)
+ #plot each line
+ for (i in 1:length(counts_density))
+ lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+ #create legend
+ legend("topright", colnames(data2plot_after),
+ col=cols, lty=ltys, cex=0.75,
+ border ="blue", text.col = "green4",
+ merge = TRUE, bg = "gray90") 
+```
+
+## PART #1: differential expression 
+1. Calculate p-values for each of the genes in your expression set. How many genes were significantly differentially expressed? What thresholds did you use and why?
+* There are 7384 genes that are below the p-value. The threshold I used is 0.05 because P > 0.05 is the probability that the null hypothesis is true.
+2. Multiple hypothesis testing - correct your p-values using a multiple hypothesis correction method. Which method did you use? And Why? How many genes passed correction?
+* I used FDR correction which is recommonded by professor. 5172 genes passed the correction. Both the p-value and the correction data are based on the edgeR package, not the limma package. I used the limma package up till the point of calculating differential expression like what is sugguested on the lecture notes.
+3. Show the amount of differentially expressed genes using an MA Plot or a Volcano plot. Highlight genes of interest.
+* I showed a volcano plot using my edgeR fitted data and highlighed the upregulated to be red and down regulated to be blue.
+4. Visualize your top hits using a heatmap. Do you conditions cluster together? Explain why or why not.
+* My data clustered perfectly according to their cell types which is what my model design based on. My interpretation for the graph would be that since the colors are opposite to each other in the two different cell types, it means that the genes that are upregulated in tumoursphere would be down regulated in primary tumour samples. The shows a great results that the upregulated genes can be potential biomarkers to track if tumoursphere is present or not.
+### 1. Choice of factors in my model
+* I created the MDS by using "gender" (M or F) and "group" (control or AS).
+```{r MDS-plots} 
+heatmap_matrix <- normalized_counts[,3:ncol(normalized_counts)]
+rownames(heatmap_matrix) <- normalized_counts$GENEID
+colnames(heatmap_matrix) <- rownames(samples)
+plotMDS(heatmap_matrix, labels=rownames(samples), 
+        col = c("red","blue")[factor(samples$gender)],
+        main = "MDS plot depending on gender")
+
+plotMDS(heatmap_matrix, labels=rownames(samples), 
+        col = c("darkgreen","blue")[factor(samples$group)],
+        main = "MDS plot depending on group")
+```
+
+### 2. Define model design
+```{r model}
+model_design_pat <- model.matrix(
+  ~ samples$group+ samples$gender)
+kable(model_design_pat[1:10,1:2],type="html")
+```
+
+### 3. Calculate p-value
+There are 7384 genes that pass the p-value = 0.05
+```{r p-val, results="hide"}
+expressionMatrix <- as.matrix(normalized_counts[,3:ncol(normalized_counts)])
+rownames(expressionMatrix) <- normalized_counts$GENID
+colnames(expressionMatrix) <- colnames(normalized_counts)[3:ncol(normalized_counts)]
+minimalSet <- ExpressionSet(assayData=expressionMatrix)
+# fit
+fit <- lmFit(minimalSet, model_design_pat)
+# Use Bayes
+fit2 <- eBayes(fit,trend=TRUE)
+# Correction: BH
+topfit <- topTable(fit2, coef=ncol(model_design_pat),
+                   adjust.method = "BH",
+                   number = nrow(expressionMatrix))
+# merge gene symbol to topfit table
+output_hits <- merge(normalized_counts[,1:2], topfit, by.y = 0, by.x = 1, all.y=TRUE)
+#sorted by P-value
+output_hits <- output_hits[order(output_hits$P.Value),]
+kable(output_hits[1:5,],type="html")
+kable(output_hits[1:10,-2],type="html",row.names = FALSE)
+# number of genes that pass threshold p-value = 0.05
+length(which(output_hits$P.Value < 0.05)) # 7384
+# number of genes that pass correction
+length(which(output_hits$adj.P.Val < 0.05)) # 5172
+```
+### 4. Set up EdgeR object
+
+```{r d object}
+d = DGEList(counts=expressionMatrix, group=samples$gender)
+d <- estimateDisp(d, model_design_pat)
+```
+
+### 5. Test whether my data is suitable for edgeR - MeanVar plot
+I have shown that my data is suitable for using edgeR for further analysis. The data follows the binomial distribution.
+```{r meanvar}
+plotMeanVar(d, show.raw.vars = TRUE,                
+            show.tagwise.vars=TRUE,                 
+            show.ave.raw.vars = TRUE,                                                         
+            NBline=TRUE,
+            show.binned.common.disp.vars = TRUE,
+            main = "Binomial distribution of my data")
+```
+
+### 6. Estimate dispersion - BCV plot
+The individual dots represent each gene and the blue line is the overall trend line.
+```{r BCV}
+plotBCV(d,col.tagwise = "black",col.common = "red", 
+        main = "BCV plot of RNA-seq data")
+```
+
+### 7. Genes pass threshold and FDR correction 
+
+I used Quasi-likelihood models to fit my data and used QLFTest to test for differential expression. There are 7381 genes pass the p-value = 0.05, and 5735 genes that pass the FDR correction.
+```{r threshold and correction, results = "hide"}
+fit <- glmQLFit(d, model_design_pat)
+fit_qlf_tcga <-glmQLFit (d,model_design_pat)
+qlf <- glmQLFTest(fit_qlf_tcga)
+tt <- topTags(qlf,n=nrow(d))
+kable(topTags(qlf), type="html")
+# Get all the results
+qlf_output_hits <- topTags(qlf, 
+                           sort.by = "PValue", 
+                           n = nrow(normalized_counts))
+# Number of genes that pass the threshold p-value = 0.05
+length(which(qlf_output_hits$table$PValue < 0.05)) # 7381
+# Number of genes that pass correction
+length(which(qlf_output_hits$table$FDR < 0.05)) # 5735
+```
+
+### 8. Up and down-regulated genes
+
+I determined the number of up-regulated genes by selecting every gene that does not pass my p-value: 0.05, and also have a positive log fold change. Down-regulated genes are selected in the same way with a negative log fold change. Stored these data for later enrichment analysis on gProfileR. 
+
+```{r up and down-regulated, results="hide"}
+# number of genes that are up regulated
+length(which(qlf_output_hits$table$PValue < 0.05 
+             & qlf_output_hits$table$logFC > 0)) # 1309
+# number of genes that are down regulated
+length(which(qlf_output_hits$table$PValue < 0.05  
+             & qlf_output_hits$table$logFC < 0)) # 6072
+# Get those up and down-regulated genes
+qlf_output_hits_withgn <- merge(expressionMatrix[,1:2],qlf_output_hits, by.x=1, by.y = 0)
+upregulated_genes <- qlf_output_hits_withgn$GENEID[which(qlf_output_hits$table$PValue < 0.05 
+                                                         & qlf_output_hits$table$logFC > 0)]
+downregulated_genes <-qlf_output_hits_withgn$GENEID[which(qlf_output_hits$table$PValue < 0.05 
+                                                           & qlf_output_hits$table$logFC < 0)]
+# store data - all differentially expressed
+unreg_genes_copy <- data.frame(upregulated_genes)
+downreg_genes_copy <- data.frame(downregulated_genes)
+names(unreg_genes_copy) <- names(downreg_genes_copy)
+all_de <- rbind(unreg_genes_copy, downreg_genes_copy)
+write.table(x=all_de,
+            file="all_expr_de_genes.txt",sep = "\t",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+# up regulated
+write.table(x=upregulated_genes,
+            file="expr_upregulated_genes.txt",sep = "\t",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+# down regulated
+write.table(x=downregulated_genes,
+            file="expr_downregulated_genes.txt",sep = "\t",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+```
+
+
+### 9. Show up and down-regulated genes
+
+I have shown the up and down-regulated genes in a volcano plot by coloring them in red and blue.
+```{r up_volcano}
+volcanoData <- cbind(qlf_output_hits$table$logFC, -log10(qlf_output_hits$table$FDR))
+colnames(volcanoData) <- c("logFC", "Pval")
+up <- qlf_output_hits$table$FDR < 0.05 & qlf_output_hits$table$logFC > 0
+point.col <- ifelse(up, "red", "black")
+plot(volcanoData, pch = 16, col = point.col, cex = 0.5,
+     main = "Up-regulated genes in RNA-seq data")
+```
+
+```{r down_volcano}
+down <- qlf_output_hits$table$FDR < 0.05 & qlf_output_hits$table$logFC < 0
+point.col <- ifelse(down, "blue", "black")
+plot(volcanoData, pch = 16, col = point.col, cex = 0.5,
+      main = "Down-regulated genes in RNA-seq data")
+```
+
+
+### 10. Heatmap
+
+To test the differential expression, I used the heatmap and it has shown a clear distinction between up and down regulated genes. There is a clear difference between the primary tumour samples and tumoursphere samples.(They are reversed.) The clustering is very obvious to show that differential expression exists.
+
+```{r heatmap}
+top_hits <- rownames(qlf_output_hits$table)[output_hits$P.Value<0.05] 
+heatmap_matrix_tophits <- t(scale(t(heatmap_matrix[which(rownames(heatmap_matrix) %in% top_hits),]))) 
+if(min(heatmap_matrix_tophits) == 0){
+    heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits)), 
+                             c( "white", "red"))
+    } else {
+    heatmap_col = colorRamp2(c(min(heatmap_matrix_tophits), 0, max(heatmap_matrix_tophits)), c("blue", "white", "red"))
+    }
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix_tophits),
+                           cluster_rows = TRUE,
+                           cluster_columns = FALSE,
+                           show_row_dend = TRUE,
+                           show_column_dend = FALSE,
+                           col=heatmap_col,
+                           show_column_names = TRUE, 
+                           show_row_names = FALSE,
+                           show_heatmap_legend = TRUE)
+current_heatmap
+```
+
+
+
+## PART 2: Thresholded over-representation analysis
+### Introduction to PART 2:
+1. *Which method did you choose and why?*
+* I chose to use g:profiler as it is familiar to me and also provides a wide 
+variety of sources to get a good overview and grasp of the processess effected by the up and down regulated genes.
+2. *What annotation data did you use and why? What version of the annotation are you using?*
+I used Gene ontology: Biological Process released 2021-12-15, Reactome released 2022-1-3, Wiki Pathways released 2021-12-10.
+I am using this since this was recommend.
+3. *How many genesets were returned with what thresholds?*
+* The threshold for all the queries: 0.05
+
+4. Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list (i.e all differentially expressed genes together vs. the up-regulated and down regulated differentially expressed genes separately)?
+
+
+### Reference   
+1. https://www.ncbi.nlm.nih.gov/geo/info/geo2r.html#how_to_use   
+2. https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE221786  
+3. https://github.com/bcb420-2020/General_Course_Info/wiki/Assignment%232#user-content-What_to_hand_in
+4. lecture6_differential_expression_2022Updated.pdf
+5. https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6788885/
+6. https://www.mayoclinic.org/diseases-conditions/ankylosing-spondylitis/symptoms-causes/syc-20354808#:~:text=Ankylosing%20spondylitis%2C%20also%20known%20as,be%20difficult%20to%20breathe%20deeply.
